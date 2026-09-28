@@ -5,7 +5,7 @@ A starting had has 8 cards, if you can discard and then draw up to 5 cards, how 
 """
 import eval7, pprint
 import numpy as np
-from scipy.special import comb
+from scipy.special import comb, factorial
 from scipy.stats import hypergeom
 import matplotlib.pyplot as plt
 
@@ -15,9 +15,11 @@ from timer import time_methods
 #@time_methods
 class PokerHands:
 
+    # References
     RANKS = ('2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A')
     SUITS = ('c', 'd', 'h', 's')
     HAND_SIZE = 5
+    
 
     def __init__(self, hand, deck, starting_hand_size=8, verbose = True):
 
@@ -30,6 +32,9 @@ class PokerHands:
         self.min_suit_count = self.starting_hand_size // 4 # absolute minimum num of suits that is possible to have in hand for intended flush suit
         self.update(hand)
         
+
+        self.straight_references = [['A','2', '3', '4', '5']] + [self.RANKS[i:i+5] for i in range(9)]
+
         # Settings
         self.verbose = verbose
 
@@ -68,7 +73,7 @@ class PokerHands:
     def is_straight(self, current_ranks=None):
         """Detects if hand has a straight"""
         evaluated_hand = eval7.evaluate(self.hand)
-        is_straight = eval7.handtype(evaluated_hand) == "Straight"
+        is_straight = (eval7.handtype(evaluated_hand) == "Straight") or (eval7.handtype(evaluated_hand) == "Straight Flush")
         return is_straight
 
     def simulate_greedy_flush(self):
@@ -120,7 +125,7 @@ class PokerHands:
     def simulate_greedy_straight(self):
         """Simulate one round with the goal of getting a straight using the greedy method"""
         # Does not value higher straights
-        straight_references = [set(['A','2', '3', '4', '5'])] + [set(self.RANKS[i:i+5]) for i in range(9)]
+        
 
         num_discards = 0
         current_ranks = self.obs_ranks
@@ -133,7 +138,7 @@ class PokerHands:
 
             # keep only the values in the target straight
             hand_to_keep = [
-                card for i, card in enumerate(self.hand) 
+                card for card in self.hand 
                 if self.RANKS[card.rank] in target_straight
                 ] # filter to only keep ranks in target straight
             current_ranks = self.get_rank_count(hand_to_keep, count_dict={}) # get rank count to check for duplicates
@@ -180,7 +185,8 @@ class PokerHands:
 
     def simulate_likely_flush(self):
         """Simulate one round with the goal"""
-        
+        straight_references = [set(['A','2', '3', '4', '5'])] + [set(self.RANKS[i:i+5]) for i in range(9)]
+
         num_discards = 0
         current_suits = self.obs_suits
         start = time.time()
@@ -225,32 +231,141 @@ class PokerHands:
             print(f"It took {num_discards} discards to achieve a flush")
         return num_discards
 
-    def get_likelihood(self, current_suits, hand_type):
+    def simulate_likely_straight(self):
+        
+        num_discards = 0
+        current_ranks = self.obs_ranks
+        start = time.time()
+        while not self.is_straight(current_ranks):
+            straight_likelihood = self.get_likelihood(current_ranks, hand_type="straight")
+            max_likelihood = max(straight_likelihood.values())
+            if max_likelihood == 0:
+                return np.nan
+            most_likely_straight = [straight for straight, likelihood in straight_likelihood.items() if likelihood == max_likelihood]
+            target_straight = most_likely_straight[-1] # randomly highest ranked straight
+            print(target_straight, straight_likelihood[target_straight])
+
+            # keep only the values in the target straight
+            hand_to_keep = [
+                card for card in self.hand 
+                if self.RANKS[card.rank] in target_straight.split(",")
+                ] # filter to only keep ranks in target straight
+            current_ranks = self.get_rank_count(hand_to_keep, count_dict={}) # get rank count to check for duplicates
+            max_rank_count = max(current_ranks.values())
+            hand_to_keep_has_duplicates = max_rank_count > 1
+            if hand_to_keep_has_duplicates:
+                # for each duplicate rank, pick a random card
+                duplicate_ranks_in_hand_to_keep = [rank for rank, count in current_ranks.items() if count == max_rank_count] # identified duplicate ranks
+                duplicate_rank_to_keep = [
+                    next(card for card in hand_to_keep if self.RANKS[card.rank] == rank) # picking one card of a given rank 
+                    for rank in duplicate_ranks_in_hand_to_keep
+                    ]
+                # recompose hand to keep as unique ranks + deduplicated ranks
+                hand_to_keep = [card for card in hand_to_keep if self.RANKS[card.rank] not in duplicate_ranks_in_hand_to_keep] + duplicate_rank_to_keep
+            
+            cards_to_discard = self.starting_hand_size - len(hand_to_keep)
+            discarding_too_many_cards = cards_to_discard > self.HAND_SIZE
+            if discarding_too_many_cards:
+                # need to add a random card back
+                #TODO: what happens if I need to grab more than 1 card?
+                random_card = next(card for card in self.hand if card not in hand_to_keep)
+                hand_to_keep.append(random_card)
+
+            self.hand = hand_to_keep
+            cards_to_discard = self.starting_hand_size - len(self.hand)
+            discarded_more_than_hand_size = cards_to_discard > self.HAND_SIZE
+            if discarded_more_than_hand_size:
+                raise ValueError(f"Error: Discarded more than {self.HAND_SIZE} cards is not allowed. Ended up discarding {cards_to_discard} cards")
+
+            try:
+                new_cards = self.deck.deal(cards_to_discard)
+            except ValueError:
+                if self.verbose:
+                    print("Ran out of cards to draw")
+                num_discards = np.nan
+                return num_discards
+            self.update(new_cards)
+            current_suits = self.get_rank_count(self.hand, count_dict={})
+            num_discards += 1
+        if self.verbose:
+            print(f"It took {num_discards} discards to achieve a straight")
+        return num_discards
+
+    def get_likelihood(self, current_cards, hand_type):
         """Calculate the chances of getting the cards needed to complete the hand in the next discard"""
 
         chances = {}
-        observed_cards = self.obs_suits
+        
+        if hand_type == "flush":
+            observed_cards = self.obs_suits
+        elif hand_type == "straight":
+            observed_cards = self.obs_ranks
+        else:
+            raise ValueError("Unexpected hand type")
+
         total_seen_cards = sum(observed_cards.values())
         num_cards_left_in_deck = 52 - total_seen_cards
         if hand_type == "flush":
             # array of suit related numbers
-            num_suits_in_hand_arr = np.array([current_suits.get(suit, 0) for suit in self.SUITS])
+            num_suits_in_hand_arr = np.array([current_cards.get(suit, 0) for suit in self.SUITS])
             num_suits_remaining_arr = np.array([13 - observed_cards.get(suit,0) for suit in self.SUITS])
-            num_cards_to_draw_arr = draw_arr = np.minimum(self.starting_hand_size - num_suits_in_hand_arr, self.HAND_SIZE)
+            num_cards_to_draw_arr = np.minimum(self.starting_hand_size - num_suits_in_hand_arr, self.HAND_SIZE)
             num_cards_needed_arr = np.minimum(self.HAND_SIZE - num_suits_in_hand_arr, self.HAND_SIZE)
             chances_vals = 1 - hypergeom.cdf(
                 num_cards_needed_arr - 1, 
                 num_cards_left_in_deck, 
-                num_suits_remaining_arr, 
+                num_suits_remaining_arr, # need to change, difficult as each rank is a different type of success while still neededing to hit all the needed cards
                 num_cards_to_draw_arr
                 )
             chances = dict(zip(self.SUITS, chances_vals))
 
         elif hand_type == "straight":
-            pass
+            # straight type x sorted values in straight
+            num_straights_in_hand_arr = np.array([
+                [current_cards.get(rank,0) for rank in straight] 
+                for straight in self.straight_references])
+            num_cards_per_straight = np.count_nonzero(num_straights_in_hand_arr, axis=1)
+            ranks_needed_to_draw_mask = np.where(num_straights_in_hand_arr == 0, 1, 0)
+            ranks_remaining_per_straight_arr = 4 - np.array([
+                [observed_cards.get(rank, 0) for rank in straight]
+                for straight in self.straight_references])
+            needed_ranks_remaining_per_straight_arr = ranks_remaining_per_straight_arr * ranks_needed_to_draw_mask # keep only ranks that are needed
+            num_cards_to_draw_arr = np.minimum(self.starting_hand_size - num_cards_per_straight, self.HAND_SIZE)
+            num_cards_needed_arr = np.minimum(self.HAND_SIZE - num_cards_per_straight, self.HAND_SIZE)
+            
+            # problem
+            """
+            If I am aiming for a 5,6,7,8,9 straight and I need a 5 and 9, then I need to treat 5 and 9 as different pools.
+            drawing another 5 cards means that hands need to have at least one 5 and at least one 9
+            """
+            # approximate by assuming all ranks are independent, true answer would use inclusion-exclusion principle
+            rank_chances_vals = 1 - hypergeom.cdf(
+                0, 
+                num_cards_left_in_deck, # int
+                needed_ranks_remaining_per_straight_arr, # matrix of straight type vs rank in straight where values are number needed and left in the deck
+                num_cards_to_draw_arr[:, None]
+                )
+            rank_chances_vals_no_zeros = np.where(needed_ranks_remaining_per_straight_arr > 0, rank_chances_vals, 1) # replace all zeros with ones
+            chances_vals = rank_chances_vals_no_zeros.prod(axis=1) # approximate by multiplying all together
+            chances = dict(zip([",".join(straight) for straight in self.straight_references], chances_vals))
+
+            # check for impossible to build straights
+            straights_with_nans = np.isnan(rank_chances_vals).any(axis=1)
+            if straights_with_nans.any():
+                chances = {
+                    straight: 0 if straights_with_nans[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
+                }
+                
+
+
         else:
             raise ValueError("Unexpected hand type")
         
+
+        has_nans = np.isnan(np.array(list(chances.values()))).any()
+        if has_nans:
+            raise ValueError("Detected nans in probabilities")
+
         return chances
 
     def hypergeo_prob(self, population_size, num_successes, num_cards_drawn, num_obs_successes):
@@ -284,7 +399,7 @@ def main():
     PH = PokerHands(starting_hand, deck, starting_hand_size)
     #print(PH.simulate_one_flush_round())
     #print(PH.simulate_one_straight_round())
-    print(PH.simulate_prob_flush())
+    print(PH.simulate_likely_straight())
     print()
 
 def simulation(method, num_simulations=1000, verbose=False):
@@ -317,24 +432,28 @@ if __name__ == "__main__":
     # main()
 
     num_simulations = 100_000
-    flush_discards_greedy = simulation("greedy_flush", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_greedy)} discards on average")
-    print(f"\tThere were {np.isnan(flush_discards_greedy).sum().item()} rounds that ran out of cards in the deck")
+    # flush_discards_greedy = simulation("greedy_flush", num_simulations, verbose=False)
+    # print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_greedy)} discards on average")
+    # print(f"\tThere were {np.isnan(flush_discards_greedy).sum().item()} rounds that ran out of cards in the deck")
 
-    flush_discards_likely = simulation("likely_flush", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_likely)} discards on average")
-    print(f"\tThere were {np.isnan(flush_discards_likely).sum().item()} rounds that ran out of cards in the deck")
+    # flush_discards_likely = simulation("likely_flush", num_simulations, verbose=False)
+    # print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_likely)} discards on average")
+    # print(f"\tThere were {np.isnan(flush_discards_likely).sum().item()} rounds that ran out of cards in the deck")
 
-    # straight_discards = simulation("straight", num_simulations, verbose=False)
-    # print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards)} discards on average")
-    # print(f"\tThere were {np.isnan(straight_discards).sum().item()} rounds that ran out of cards in the deck")
+    # # straight_discards_greedy = simulation("greedy_straight", num_simulations, verbose=False)
+    # # print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_greedy)} discards on average")
+    # # print(f"\tThere were {np.isnan(straight_discards_greedy).sum().item()} rounds that ran out of cards in the deck")
 
-    fig, axs = plt.subplots(1, 2)
+    straight_discards_likely = simulation("likely_straight", num_simulations, verbose=False)
+    print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_likely)} discards on average")
+    print(f"\tThere were {np.isnan(straight_discards_likely).sum().item()} rounds that ran out of cards in the deck")
 
-    axs[0].hist(flush_discards_greedy)
-    axs[0].set_title("Num discards for Flushes")
-    axs[1].hist(flush_discards_likely)
-    axs[1].set_title("Num discards for Straights")
-    plt.show()
+    # fig, axs = plt.subplots(1, 2)
+
+    # axs[0].hist(flush_discards_greedy)
+    # axs[0].set_title("Num discards for Flushes")
+    # axs[1].hist(flush_discards_likely)
+    # axs[1].set_title("Num discards for Straights")
+    # plt.show()
 
     # print()
