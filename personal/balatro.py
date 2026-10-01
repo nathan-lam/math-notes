@@ -38,21 +38,30 @@ class PokerHands:
         # Settings
         self.verbose = verbose
 
-    def get_counts(self, x_list, count_dict={}):
+    def get_counts(self, x_list, count_dict=None):
         """Get count of elements in a list"""
+        if count_dict is None:
+            count_dict = {}
+            
         for x in x_list:
             count_dict[x] = 1 + count_dict.get(x,0)
         return count_dict
 
-    def get_suit_count(self, hand, count_dict={}):
+    def get_suit_count(self, hand, count_dict=None):
         """Counts the number of suits, and updates if adding to an existing count dict"""
+        if count_dict is None:
+            count_dict = {}
+
         current_suit_count = self.get_counts(
             [self.SUITS[h.suit] for h in hand], 
             count_dict)
         return current_suit_count
 
-    def get_rank_count(self, hand, count_dict={}):
+    def get_rank_count(self, hand, count_dict=None):
         """Counts the number of ranks, and updates if adding to an existing count dict"""
+        if count_dict is None:
+            count_dict = {}
+
         current_rank_count = self.get_counts(
             [self.RANKS[h.rank] for h in hand], 
             count_dict)
@@ -76,14 +85,13 @@ class PokerHands:
         is_straight = (eval7.handtype(evaluated_hand) == "Straight") or (eval7.handtype(evaluated_hand) == "Straight Flush")
         return is_straight
 
-    def simulate_one_round(self, hand_type, hand_eval, stop_cond):
+    def simulate_one_round(self, hand_type, hand_eval):
         """
         Simulates one round to play 1 hand
         
         Args:
             hand_type (str): string signalling which hand type to aim for
             hand_eval (func): method for picking which type of hand to play
-            stop_cond (func): method for end
         
         Returns:
             num_discards (int): Number of discards it took to achieve hand. np.nan if not achieved
@@ -93,11 +101,11 @@ class PokerHands:
         if hand_type == "flush":
             current_hand = self.obs_suits
             stop_cond = self.is_flush
-            get_count = lambda hand: self.get_suit_count(hand, count_dict={})
+            get_count = lambda hand: self.get_suit_count(hand)
         elif hand_type == "straight":
             current_hand = self.obs_ranks
             stop_cond = self.is_straight
-            get_count = lambda hand: self.get_rank_count(hand, count_dict={})
+            get_count = lambda hand: self.get_rank_count(hand)
         else:
             self.raise_hand_type_error(hand_type=hand_type)
 
@@ -112,13 +120,16 @@ class PokerHands:
                 target_poker_hand = np.random.choice(max_poker_hands).item() # randomly pick
             elif hand_type == "straight":
                 target_poker_hand = max_poker_hands[-1] # pick highest viable straight, assumes sorted
+            
+            if self.verbose:
+                print(target_poker_hand, poker_eval[target_poker_hand])
 
             # Picking which cards to keep
             hand_to_keep = self.get_hand_to_keep(hand_type, target_poker_hand)
 
             # Executing discard
             num_cards_left_in_deck = len(self.deck)
-            cards_to_discard = self.starting_hand_size - len(self.hand)
+            cards_to_discard = self.starting_hand_size - len(hand_to_keep)
             card_to_draw = min(cards_to_discard, num_cards_left_in_deck)
             if num_cards_left_in_deck <= 0:
                 if self.verbose:
@@ -134,7 +145,7 @@ class PokerHands:
             num_discards += 1
 
         if self.verbose:
-            print(f"It took {num_discards} discards to achieve a straight")
+            print(f"It took {num_discards} discards to achieve a {hand_type}")
         return num_discards
 
     def get_hand_to_keep(self, hand_type, target_poker_hand):
@@ -161,7 +172,7 @@ class PokerHands:
         # Remove duplicates (only applies to straights)
         hand_to_keep_has_duplicates = False
         if hand_type == "straight":
-            current_ranks = self.get_rank_count(hand_to_keep, count_dict={}) # get rank count to check for duplicates
+            current_ranks = self.get_rank_count(hand_to_keep) # get rank count to check for duplicates
             max_rank_count = max(current_ranks.values())
             hand_to_keep_has_duplicates = max_rank_count > 1
         
@@ -191,24 +202,25 @@ class PokerHands:
     def get_greedy_flush(self, current_suits, hand_type):
         """Pick flush based on which suit is the most complete"""
         if hand_type != "flush":
-            raise_wrong_hand_type_error("get_greedy_flush", hand_type)
+            self.raise_wrong_hand_type_error("get_greedy_flush", hand_type)
+        assert sum(current_suits.values()) == 8
         return current_suits
 
     def get_greedy_straight(self, current_ranks, hand_type):
         if hand_type != "straight":
-            raise_wrong_hand_type_error("get_greedy_straight", hand_type)
+            self.raise_wrong_hand_type_error("get_greedy_straight", hand_type)
         hand_rank_set = set(current_ranks.keys())
         straight_hits = {",".join(straight): len(set(straight).intersection(hand_rank_set)) for straight in self.straight_references}
         return straight_hits
 
     def get_likely_flush(self, current_suits, hand_type):
         if hand_type != "flush":
-            raise_wrong_hand_type_error("get_likely_flush", hand_type)
+            self.raise_wrong_hand_type_error("get_likely_flush", hand_type)
         return self.get_likelihood(current_suits, hand_type="flush")
 
     def get_likely_straight(self, current_ranks, hand_type):
         if hand_type != "straight":
-            raise_wrong_hand_type_error("get_likely_straight", hand_type)
+            self.raise_wrong_hand_type_error("get_likely_straight", hand_type)
         return self.get_likelihood(current_ranks, hand_type="straight")
 
     # def simulate_greedy_flush(self):
@@ -502,7 +514,6 @@ class PokerHands:
                 chances = {
                     straight: 0 if not_enough_cards[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
                 }
-                
 
 
         else:
@@ -514,11 +525,7 @@ class PokerHands:
             raise ValueError("Detected nans in probabilities")
         elif all(val == 1.0 for val in chances.values()):
             raise ValueError("Sus")
-        
-        hand_not_in_max_prob = set(current_cards.keys()).intersection(set(max(chances, key=chances.get).split(","))) == {}
-        if hand_not_in_max_prob:
-            raise ValueError("Why is the max prob straight not in the hand?")
-
+    
         return chances
 
     def raise_hand_type_error(self, hand_type):
@@ -527,11 +534,10 @@ class PokerHands:
     def raise_wrong_hand_type_error(self, hand_eval, hand_type):
         raise ValueError(f"Incompatible poker hand with hand_eval. {hand_eval} method does not work with {hand_type}")
 
-
 def main():
-    #print(run_simulation("likely_flush", num_simulations=1000))
+    print(run_simulation("likely_straight", num_simulations=1000, verbose=True))
 
-    compare_methods()
+    # compare_methods()
 
     print()
 
@@ -550,13 +556,13 @@ def run_simulation(method, num_simulations=1000, verbose=False):
 
 
         if method == "greedy_flush":
-            num_discards = PH.simulate_one_round("flush", PH.get_greedy_flush, PH.is_flush)
+            num_discards = PH.simulate_one_round("flush", PH.get_greedy_flush)
         elif method == "likely_flush":
-            num_discards = PH.simulate_one_round("flush", PH.get_likely_flush, PH.is_flush)
+            num_discards = PH.simulate_one_round("flush", PH.get_likely_flush)
         elif method == "greedy_straight":
-            num_discards = PH.simulate_one_round("straight", PH.get_greedy_straight, PH.is_straight)
+            num_discards = PH.simulate_one_round("straight", PH.get_greedy_straight)
         elif method == "likely_straight":
-            num_discards = PH.simulate_one_round("straight", PH.get_likely_straight, PH.is_straight)
+            num_discards = PH.simulate_one_round("straight", PH.get_likely_straight)
         else:
             raise ValueError("Unexpected method")
         list_of_discards.append(num_discards)
