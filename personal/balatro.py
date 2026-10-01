@@ -63,18 +63,130 @@ class PokerHands:
         self.hand += hand 
         self.obs_suits = self.get_suit_count(hand, self.obs_suits)
         self.obs_ranks = self.get_rank_count(hand, self.obs_ranks)
-    
-    def is_flush(self, current_suits=None):
+
+            
+    def is_flush(self):
         """Detects if hand has a flush"""
         evaluated_hand = eval7.evaluate(self.hand)
         is_flush = (eval7.handtype(evaluated_hand) == "Flush") or (eval7.handtype(evaluated_hand) == "Straight Flush")
         return is_flush
     
-    def is_straight(self, current_ranks=None):
+    def is_straight(self):
         """Detects if hand has a straight"""
         evaluated_hand = eval7.evaluate(self.hand)
         is_straight = (eval7.handtype(evaluated_hand) == "Straight") or (eval7.handtype(evaluated_hand) == "Straight Flush")
         return is_straight
+
+    def simulate_one_round(self, hand_type, hand_eval, stop_cond):
+        """
+        Simulates one round to play 1 hand
+        
+        Args:
+            hand_type (str): string signalling which hand type to aim for
+            hand_eval (func): method for picking which type of hand to play
+            stop_cond (func): method for end
+        
+        Returns:
+            num_discards (int): Number of discards it took to achieve hand. np.nan if not achieved
+        """
+
+        # Preparing methods
+        if hand_type == "flush":
+            current_hand = self.obs_suits
+            stop_cond = self.is_flush
+            get_count = lambda hand: self.get_suit_count(hand, count_dict={})
+        elif hand_type == "straight":
+            current_hand = self.obs_ranks
+            stop_cond = self.is_straight
+            get_count = lambda hand: self.get_rank_count(hand, count_dict={})
+        else:
+            self.raise_hand_type_error(hand_type=hand_type)
+
+        # Executing loop
+        num_discards = 0
+        while not stop_cond():
+            # Picking which poker hand to aim for
+            poker_eval = self.hand_eval(current_ranks, hand_type=hand_type)
+            max_poker_val = max(poker_eval.values())
+            max_poker_hands = [poker for poker, val in poker_eval.items() if val == max_poker_val]
+            if hand_type == "flush":
+                target_poker_hand = np.random.choice(max_poker_hands).item() # randomly pick
+            elif hand_type == "straight":
+                target_poker_hand = max_poker_hands[-1] # pick highest viable straight
+
+            # Picking which cards to keep
+            hand_to_keep = self.get_hand_to_keep(hand_type, target_poker_hand)
+
+            # Executing discard
+            try:
+                new_cards = self.deck.deal(cards_to_discard)
+            except ValueError:
+                if self.verbose:
+                    print("Ran out of cards to draw")
+                num_discards = np.nan
+                return num_discards
+
+            # Updating for next loop
+            self.hand = hand_to_keep
+            self.update(new_cards) # add new cards hand and dict of observed cards
+            current_hand = get_count(self.hand, count_dict={})
+            num_discards += 1
+
+        if self.verbose:
+            print(f"It took {num_discards} discards to achieve a straight")
+        return num_discards
+
+    def get_hand_to_keep(self, hand_type, target_poker_hand):
+        """Preparing cards to keep in hand to throw the rest away"""
+
+        # Select cards to keep
+        if hand_type == "flush":
+            hand_to_keep = [
+                card for card in self.hand
+                if self.SUITS[card.suit]==target_poker_hand
+                ] # filter to keep only target suit
+        elif hand_type == "straight":
+            hand_to_keep = [
+                card for card in self.hand
+                if self.RANKS[card.rank] in target_poker_hand.split(",")
+                ] # filter to keep only target suit
+        else:
+            self.raise_hand_type_error(hand_type=hand_type)
+
+        if hand_to_keep == []:
+            raise ValueError("Selected poker hand with no viable cards in hand")
+        
+
+        # Remove duplicates (only applies to straights)
+        hand_to_keep_has_duplicates = False
+        if hand_type == "straight":
+            current_ranks = self.get_rank_count(hand_to_keep, count_dict={}) # get rank count to check for duplicates
+            max_rank_count = max(current_ranks.values())
+            hand_to_keep_has_duplicates = max_rank_count > 1
+        
+        if hand_type == "straight" and hand_to_keep_has_duplicates:
+            # for each duplicate rank, pick a random card
+            duplicate_ranks_in_hand_to_keep = [rank for rank, count in current_ranks.items() if count == max_rank_count] # identified duplicate ranks
+            duplicate_rank_to_keep = [
+                next(card for card in hand_to_keep if self.RANKS[card.rank] == rank) # picking one card of a given rank 
+                for rank in duplicate_ranks_in_hand_to_keep
+                ]
+            
+            # recompose hand to keep as unique ranks + deduplicated ranks
+            hand_to_keep = [card for card in hand_to_keep if self.RANKS[card.rank] not in duplicate_ranks_in_hand_to_keep] + duplicate_rank_to_keep
+
+        # Add back cards so discards are at most hand_size (5)
+        num_cards_to_discard = self.starting_hand_size - len(hand_to_keep)
+        discarding_too_many_cards = num_cards_to_discard > self.HAND_SIZE
+        if discarding_too_many_cards:
+            # need to add a random card back
+            num_cards_to_add_back = cards_to_discard - self.HAND_SIZE
+            cards_not_in_hand = iter([card for card in self.hand if card not in hand_to_keep])
+            random_cards = [next(cards_not_in_hand, None) for _ in range(num_cards_to_add_back)]
+            hand_to_keep += random_cards
+        
+        return hand_to_keep
+
 
     def simulate_greedy_flush(self):
         """Simulate one round with the goal of getting a flush using the greedy method"""
@@ -243,13 +355,16 @@ class PokerHands:
                 return np.nan
             most_likely_straight = [straight for straight, likelihood in straight_likelihood.items() if likelihood == max_likelihood]
             target_straight = most_likely_straight[-1] # randomly highest ranked straight
-            print(target_straight, straight_likelihood[target_straight])
+            if self.verbose:
+                print(target_straight, straight_likelihood[target_straight])
 
             # keep only the values in the target straight
             hand_to_keep = [
                 card for card in self.hand 
                 if self.RANKS[card.rank] in target_straight.split(",")
                 ] # filter to only keep ranks in target straight
+            if hand_to_keep == []:
+                raise ValueError("Selected straight with no viable cards in hand")
             current_ranks = self.get_rank_count(hand_to_keep, count_dict={}) # get rank count to check for duplicates
             max_rank_count = max(current_ranks.values())
             hand_to_keep_has_duplicates = max_rank_count > 1
@@ -260,6 +375,7 @@ class PokerHands:
                     next(card for card in hand_to_keep if self.RANKS[card.rank] == rank) # picking one card of a given rank 
                     for rank in duplicate_ranks_in_hand_to_keep
                     ]
+                
                 # recompose hand to keep as unique ranks + deduplicated ranks
                 hand_to_keep = [card for card in hand_to_keep if self.RANKS[card.rank] not in duplicate_ranks_in_hand_to_keep] + duplicate_rank_to_keep
             
@@ -267,12 +383,13 @@ class PokerHands:
             discarding_too_many_cards = cards_to_discard > self.HAND_SIZE
             if discarding_too_many_cards:
                 # need to add a random card back
-                #TODO: what happens if I need to grab more than 1 card?
-                random_card = next(card for card in self.hand if card not in hand_to_keep)
-                hand_to_keep.append(random_card)
+                num_cards_to_add_back = cards_to_discard - self.HAND_SIZE
+                cards_not_in_hand = iter([card for card in self.hand if card not in hand_to_keep])
+                random_cards = [next(cards_not_in_hand, None) for _ in range(num_cards_to_add_back)]
+                hand_to_keep += random_cards
 
-            self.hand = hand_to_keep
-            cards_to_discard = self.starting_hand_size - len(self.hand)
+            
+            cards_to_discard = self.starting_hand_size - len(hand_to_keep)
             discarded_more_than_hand_size = cards_to_discard > self.HAND_SIZE
             if discarded_more_than_hand_size:
                 raise ValueError(f"Error: Discarded more than {self.HAND_SIZE} cards is not allowed. Ended up discarding {cards_to_discard} cards")
@@ -284,6 +401,7 @@ class PokerHands:
                     print("Ran out of cards to draw")
                 num_discards = np.nan
                 return num_discards
+            self.hand = hand_to_keep
             self.update(new_cards)
             current_suits = self.get_rank_count(self.hand, count_dict={})
             num_discards += 1
@@ -355,6 +473,12 @@ class PokerHands:
                 chances = {
                     straight: 0 if straights_with_nans[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
                 }
+
+            not_enough_cards = (num_straights_in_hand_arr + needed_ranks_remaining_per_straight_arr>0).sum(axis=1) < 5
+            if np.any(not_enough_cards):
+                chances = {
+                    straight: 0 if not_enough_cards[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
+                }
                 
 
 
@@ -365,6 +489,12 @@ class PokerHands:
         has_nans = np.isnan(np.array(list(chances.values()))).any()
         if has_nans:
             raise ValueError("Detected nans in probabilities")
+        elif all(val == 1.0 for val in chances.values()):
+            raise ValueError("Sus")
+        
+        hand_not_in_max_prob = set(current_cards.keys()).intersection(set(max(chances, key=chances.get).split(","))) == {}
+        if hand_not_in_max_prob:
+            raise ValueError("Why is the max prob straight not in the hand?")
 
         return chances
 
@@ -373,6 +503,9 @@ class PokerHands:
         sample_space = comb(population_size, num_cards_drawn)
         prob = (comb(num_successes, num_obs_successes) * comb(population_size-num_successes, num_cards_drawn - num_obs_successes)) / sample_space
         return prob
+
+    def raise_hand_type_error(self, hand_type):
+        raise ValueError(f"Unexpected hand type. Expected 'flush' or 'straight'. Received {hand_type}")
 
     def reset(self):
         self.hand = []
