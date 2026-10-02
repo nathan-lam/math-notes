@@ -2,12 +2,16 @@
 Simulation to determine whether straights or flushes are easier to get in the game Balatro
 
 A starting had has 8 cards, if you can discard and then draw up to 5 cards, how common is it to complete a flush vs straight
+
+Simulation is considered 95% done.
+There is roughly a ~1 in 1 billion event that is occuring, but that is basically insignificant
 """
 import eval7, pprint
 import numpy as np
 from scipy.special import comb, factorial
 from scipy.stats import hypergeom
 import matplotlib.pyplot as plt
+import pandas as pd
 
 import time
 from timer import time_methods
@@ -28,6 +32,8 @@ class PokerHands:
         self.hand=[]
         self.obs_suits = {} # history of all observed suits
         self.obs_ranks = {} # history of all observed ranks
+        self.eval_history = []
+        self.hand_history = []
 
         self.min_suit_count = self.starting_hand_size // 4 # absolute minimum num of suits that is possible to have in hand for intended flush suit
         self.update(hand)
@@ -70,19 +76,19 @@ class PokerHands:
     def update(self, hand):
         """Update hand, historical observed suits, and observed historical ranks"""
         self.hand += hand 
+        self.hand_history.append(self.hand)
         self.obs_suits = self.get_suit_count(hand, self.obs_suits)
         self.obs_ranks = self.get_rank_count(hand, self.obs_ranks)
          
-    def is_flush(self):
+    def is_flush(self, suit_count):
         """Detects if hand has a flush"""
-        evaluated_hand = eval7.evaluate(self.hand)
-        is_flush = (eval7.handtype(evaluated_hand) == "Flush") or (eval7.handtype(evaluated_hand) == "Straight Flush")
+        is_flush = any(count >= 5 for suit, count in suit_count.items())
         return is_flush
     
-    def is_straight(self):
+    def is_straight(self, rank_count):
         """Detects if hand has a straight"""
-        evaluated_hand = eval7.evaluate(self.hand)
-        is_straight = (eval7.handtype(evaluated_hand) == "Straight") or (eval7.handtype(evaluated_hand) == "Straight Flush")
+        hand_set = set(rank_count.keys())
+        is_straight = any(set(straight).issubset(hand_set) for straight in self.straight_references)
         return is_straight
 
     def simulate_one_round(self, hand_type, hand_eval):
@@ -111,9 +117,10 @@ class PokerHands:
 
         # Executing loop
         num_discards = 0
-        while not stop_cond():
+        while not stop_cond(current_hand):
             # Picking which poker hand to aim for
             poker_eval = hand_eval(current_hand, hand_type) # output keys are sorted
+            self.eval_history.append(poker_eval)
             max_poker_val = max(poker_eval.values())
             max_poker_hands = [poker for poker, val in poker_eval.items() if val == max_poker_val]
             if hand_type == "flush":
@@ -203,7 +210,8 @@ class PokerHands:
         """Pick flush based on which suit is the most complete"""
         if hand_type != "flush":
             self.raise_wrong_hand_type_error("get_greedy_flush", hand_type)
-        assert sum(current_suits.values()) == 8
+        if sum(current_suits.values()) != 8 and len(self.deck) > 0:
+            raise ValueError("bruh")
         return current_suits
 
     def get_greedy_straight(self, current_ranks, hand_type):
@@ -483,7 +491,7 @@ class PokerHands:
                 [observed_cards.get(rank, 0) for rank in straight]
                 for straight in self.straight_references])
             needed_ranks_remaining_per_straight_arr = ranks_remaining_per_straight_arr * ranks_needed_to_draw_mask # keep only ranks that are needed
-            num_cards_to_draw_arr = np.minimum(self.starting_hand_size - num_cards_per_straight, self.HAND_SIZE)
+            num_cards_to_draw_arr = np.minimum(self.starting_hand_size - num_cards_per_straight, min(self.HAND_SIZE, num_cards_left_in_deck)) # draw up to hand size or remaining deck size
             num_cards_needed_arr = np.minimum(self.HAND_SIZE - num_cards_per_straight, self.HAND_SIZE)
             
             # problem
@@ -503,28 +511,24 @@ class PokerHands:
             chances = dict(zip([",".join(straight) for straight in self.straight_references], chances_vals))
 
             # check for impossible to build straights
+            impossible_straights = rank_chances_vals.sum(axis=1) == 0
             straights_with_nans = np.isnan(rank_chances_vals).any(axis=1)
-            if straights_with_nans.any():
+            not_enough_cards = ((num_straights_in_hand_arr + needed_ranks_remaining_per_straight_arr) > 0).sum(axis=1) < self.HAND_SIZE
+            impossible_mask = np.any((straights_with_nans, impossible_straights, not_enough_cards), axis=0)
+            if np.any(impossible_mask):
                 chances = {
-                    straight: 0 if straights_with_nans[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
+                    straight: 0 if impossible_mask[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
                 }
-
-            not_enough_cards = (num_straights_in_hand_arr + needed_ranks_remaining_per_straight_arr>0).sum(axis=1) < 5
-            if np.any(not_enough_cards):
-                chances = {
-                    straight: 0 if not_enough_cards[i] else likelihood for i, (straight, likelihood) in enumerate(chances.items())
-                }
-
 
         else:
-            raise ValueError("Unexpected hand type")
-        
-
+            raise ValueError("Unexpected hand type")   
         has_nans = np.isnan(np.array(list(chances.values()))).any()
         if has_nans:
             raise ValueError("Detected nans in probabilities")
         elif all(val == 1.0 for val in chances.values()):
-            raise ValueError("Sus")
+            raise ValueError("Unlikely scenario")
+        elif sum(chances.values()) == 0:
+            raise ValueError("Cannot have 0 probability everywhere")
     
         return chances
 
@@ -535,9 +539,9 @@ class PokerHands:
         raise ValueError(f"Incompatible poker hand with hand_eval. {hand_eval} method does not work with {hand_type}")
 
 def main():
-    print(run_simulation("likely_straight", num_simulations=1000, verbose=True))
+    #run_simulation("likely_straight", num_simulations=1_000_000, verbose=False)
 
-    # compare_methods()
+    compare_methods()
 
     print()
 
@@ -570,21 +574,21 @@ def run_simulation(method, num_simulations=1000, verbose=False):
     return list_of_discards
 
 def compare_methods():
-    num_simulations = 100_000
+    num_simulations = 1_000_000
     flush_discards_greedy = run_simulation("greedy_flush", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_greedy)} discards on average")
+    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_greedy):0.6f} discards on average")
     print(f"\tThere were {np.isnan(flush_discards_greedy).sum().item()} rounds that ran out of cards in the deck")
 
     flush_discards_likely = run_simulation("likely_flush", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_likely)} discards on average")
+    print(f"{num_simulations} simulations got flushes with {np.nanmean(flush_discards_likely):0.6f} discards on average")
     print(f"\tThere were {np.isnan(flush_discards_likely).sum().item()} rounds that ran out of cards in the deck")
 
     straight_discards_greedy = run_simulation("greedy_straight", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_greedy)} discards on average")
+    print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_greedy):0.6f} discards on average")
     print(f"\tThere were {np.isnan(straight_discards_greedy).sum().item()} rounds that ran out of cards in the deck")
 
     straight_discards_likely = run_simulation("likely_straight", num_simulations, verbose=False)
-    print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_likely)} discards on average")
+    print(f"{num_simulations} simulations got straights with {np.nanmean(straight_discards_likely):0.6f} discards on average")
     print(f"\tThere were {np.isnan(straight_discards_likely).sum().item()} rounds that ran out of cards in the deck")
 
     # Plotting
@@ -601,6 +605,11 @@ def compare_methods():
 
     axs[1,1].hist(straight_discards_likely)
     axs[1,1].set_title("Num discards for Likely Straights")
+
+    print(f"Greedy flush had {100*np.mean(np.array(flush_discards_greedy) == 0):0.4f}% of starting hands with a flush")
+    print(f"Likely flush had {100*np.mean(np.array(flush_discards_likely) == 0):0.4f}% of starting hands with a flush")
+    print(f"Greedy straight had {100*np.mean(np.array(straight_discards_greedy) == 0):0.4f}% of starting hands with a straight")
+    print(f"Likely straight had {100*np.mean(np.array(straight_discards_likely) == 0):0.4f}% of starting hands with a straight")
 
     plt.show()
     # print()
